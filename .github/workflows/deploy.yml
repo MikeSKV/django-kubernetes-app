@@ -73,10 +73,10 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Set up Kubeconfig
-      uses: azure/k8s-set-context@v3
-      with:
-        kubeconfig: ${{ secrets.KUBECONFIG }}
+    #- name: Set up Kubeconfig
+     # uses: azure/k8s-set-context@v3
+      #with:
+       # kubeconfig: ${{ secrets.KUBECONFIG }}
 
     - name: Deploy to Kubernetes
       run: |
