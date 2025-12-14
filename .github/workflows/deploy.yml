@@ -13,7 +13,7 @@ env:
 
 jobs:
   test:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
 
@@ -33,7 +33,7 @@ jobs:
 
   build-and-push:
     needs: test
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -65,28 +65,32 @@ jobs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
 
-    deploy:
-      needs: build-and-push
-      runs-on: self-hosted
-      if: github.ref == 'refs/heads/main'
+  deploy:
+    needs: build-and-push
+    runs-on: self-hosted
+    if: github.ref == 'refs/heads/main'
 
-      steps:
-      - uses: actions/checkout@v4
+    steps:
+    - uses: actions/checkout@v4
 
-      - name: Deploy to Kubernetes
-        env:
-          # ЗАМЕНИТЕ ЭТОТ ПУТЬ на реальный путь к конфигу на вашем сервере!
-          # Если вы запускали раннер от своего пользователя, то это ~/.kube/config
-          # Если раннер работает как сервис, лучше скопировать конфиг в папку, доступную всем, например /tmp/kubeconfig
-          KUBECONFIG: /home/skvorodinmo/.kube/config 
-        run: |
-          echo "Checking kubectl connection..."
-          kubectl cluster-info
-          # Дальше ваши команды деплоя...
-          kubectl create namespace ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
-          kubectl apply -f k8s-manifests/ -n ${{ env.K8S_NAMESPACE }}
-          kubectl set image deployment/django-deployment django-app=ghcr.io/${{ github.repository_owner }}/django-kubernetes-app:latest -n ${{ env.K8S_NAMESPACE }}
-          kubectl rollout restart deployment/django-deployment -n ${{ env.K8S_NAMESPACE }}
-          kubectl rollout status deployment/django-deployment -n ${{ env.K8S_NAMESPACE }} --timeout=300s
-          kubectl get pods,svc,ingress -n ${{ env.K8S_NAMESPACE }}
+    - name: Set up Kubeconfig
+      uses: azure/k8s-set-context@v3
+      with:
+        kubeconfig: ${{ secrets.KUBE_CONFIG }}
 
+    - name: Deploy to Kubernetes
+      run: |
+        # Создаем namespace если не существует
+        kubectl create namespace ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+        
+        # Применяем манифесты
+        kubectl apply -f k8s-manifests/ -n ${{ env.K8S_NAMESPACE }}
+        
+        # Обновляем образ в deployment
+        kubectl set image deployment/django-deployment django-app=ghcr.io/fiercesponge703/django-kubernetes-app:latest -n django-app
+        
+        # Ждем пока поды перезапустятся
+        kubectl rollout status deployment/django-deployment -n ${{ env.K8S_NAMESPACE }} --timeout=300s
+        
+        # Показываем статус
+        kubectl get pods,svc,ingress -n ${{ env.K8S_NAMESPACE }}
