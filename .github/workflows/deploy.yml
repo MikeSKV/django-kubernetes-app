@@ -73,12 +73,11 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # Этот шаг закомментирован, чтобы использовать локальный конфиг сервера (~/.kube/config)
-    # Это решает проблему connection refused при доступе к 192.168.x.x
-    # - name: Set up Kubeconfig
-    #   uses: azure/k8s-set-context@v3
-    #   with:
-    #     kubeconfig: ${{ secrets.KUBECONFIG }}
+
+    - name: Set up Kubeconfig
+      uses: azure/k8s-set-context@v3
+      with:
+        kubeconfig: ${{ secrets.KUBECONFIG }}
 
     - name: Deploy to Kubernetes
       run: |
