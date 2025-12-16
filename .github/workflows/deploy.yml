@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 env:
-  REGISTRY: "192.168.1.68:30500"
+  REGISTRY: "127.0.0.1:30500"
   IMAGE_NAME: "django-app"
   K8S_NAMESPACE: "django-app"
   HELM_RELEASE: "django-app"
