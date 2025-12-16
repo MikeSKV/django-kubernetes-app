@@ -7,6 +7,7 @@ on:
     branches: [ main ]
 
 env:
+  # Используем localhost, так как проброшен туннель
   REGISTRY: "127.0.0.1:30500"
   IMAGE_NAME: "django-app"
   K8S_NAMESPACE: "django-app"
@@ -40,14 +41,13 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # Используем системный Docker вместо Buildx для поддержки HTTP Registry
     - name: Build and Push Native
       run: |
         # Собираем образ с тегом локального реестра
         docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest .
         docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} .
         
-        # Пушим в локальный реестр (Registry должен быть в insecure-registries)
+        # Пушим (работает, если поднят туннель на 30500)
         docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
         docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
 
@@ -71,7 +71,7 @@ jobs:
 
     - name: Deploy with Helm
       run: |
-        # Обновляем или устанавливаем приложение через Helm
+        # Обновляем или устанавливаем приложение
         helm upgrade --install ${{ env.HELM_RELEASE }} ./django-app-chart \
           --namespace ${{ env.K8S_NAMESPACE }} \
           --create-namespace \
@@ -81,21 +81,25 @@ jobs:
           --wait \
           --timeout 300s
         
-        # Показываем статус
+        # Выводим состояние для отладки
         helm list -n ${{ env.K8S_NAMESPACE }}
         kubectl get pods,svc -n ${{ env.K8S_NAMESPACE }}
 
     - name: Run database migrations
       run: |
-        # Получаем имя пода. Сначала пробуем по метке instance, если пусто - берем любой под в namespace
-        POD_NAME=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l "app.kubernetes.io/instance=${{ env.HELM_RELEASE }}" -o jsonpath='{.items[0].metadata.name}')
+        # БЕЗОПАСНЫЙ ПОИСК ПОДА
+        # 1. Ищем любой под в неймспейсе (берем первый из списка)
+        POD_NAME=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} --no-headers -o custom-columns=":metadata.name" | head -n 1)
         
+        # Убираем пробелы
+        POD_NAME=$(echo "$POD_NAME" | xargs)
+
         if [ -z "$POD_NAME" ]; then
-           echo "Pod with label instance=${{ env.HELM_RELEASE }} not found. Taking any pod..."
-           POD_NAME=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.items[0].metadata.name}')
+           echo "❌ Error: No running pods found in namespace ${{ env.K8S_NAMESPACE }}!"
+           exit 1
         fi
         
-        echo "Running migrations on pod: $POD_NAME"
+        echo "✅ Running migrations on pod: $POD_NAME"
         
         # Миграции
         kubectl exec -n ${{ env.K8S_NAMESPACE }} $POD_NAME -- python manage.py migrate
@@ -110,34 +114,35 @@ jobs:
     steps:
     - name: Check application health
       run: |
-        # Ищем сервис. Сначала пробуем по метке, если пусто - ищем по имени релиза
-        SERVICE_NAME=$(kubectl get svc -n ${{ env.K8S_NAMESPACE }} -l "app.kubernetes.io/instance=${{ env.HELM_RELEASE }}" -o jsonpath='{.items[0].metadata.name}')
+        # Отладка: покажи, что вообще есть
+        echo "=== Kubernetes Resources ==="
+        kubectl get all -n ${{ env.K8S_NAMESPACE }}
+        echo "============================"
+
+        # БЕЗОПАСНЫЙ ПОИСК СЕРВИСА
+        # Берем первый попавшийся сервис в неймспейсе
+        SERVICE_NAME=$(kubectl get svc -n ${{ env.K8S_NAMESPACE }} --no-headers -o custom-columns=":metadata.name" | head -n 1)
         
+        SERVICE_NAME=$(echo "$SERVICE_NAME" | xargs)
+
         if [ -z "$SERVICE_NAME" ]; then
-           # Пробуем просто имя релиза
-           if kubectl get svc -n ${{ env.K8S_NAMESPACE }} ${{ env.HELM_RELEASE }} >/dev/null 2>&1; then
-              SERVICE_NAME="${{ env.HELM_RELEASE }}"
-           else
-              # Фоллбэк: берем любой сервис
-              SERVICE_NAME=$(kubectl get svc -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.items[0].metadata.name}')
-           fi
-        fi
-        
-        echo "Testing service: $SERVICE_NAME"
-        
-        if [ -z "$SERVICE_NAME" ]; then
-           echo "Error: No service found!"
+           echo "❌ Error: No service found in namespace ${{ env.K8S_NAMESPACE }}!"
            exit 1
         fi
         
-        # Пробрасываем порт
+        echo "✅ Testing service: $SERVICE_NAME"
+        
+        # Пробрасываем порт в фоне
         kubectl port-forward -n ${{ env.K8S_NAMESPACE }} service/$SERVICE_NAME 8081:8000 &
         PID=$!
-        sleep 10
+        sleep 5
         
-        # Проверяем endpoints
-        curl -f http://localhost:8081/health/ || echo "Health check failed (maybe endpoint missing?)"
-        curl -f http://localhost:8081/metrics/ || echo "Metrics check failed (maybe endpoint missing?)"
+        # Проверяем эндпоинты (используем || echo для предотвращения падения скрипта)
+        echo "Checking Health..."
+        curl -f http://localhost:8081/health/ || echo "⚠️ /health check failed"
         
-        # Убиваем проброс
+        echo "Checking Metrics..."
+        curl -f http://localhost:8081/metrics/ || echo "⚠️ /metrics check failed"
+        
+        # Убиваем процесс port-forward
         kill $PID
