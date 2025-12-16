@@ -64,8 +64,6 @@ jobs:
       with:
         version: "3.12.0"
 
-    # Шаг с Kubeconfig нужен, если раннер не имеет доступа к .kube/config по умолчанию
-    # Если у вас KUBECONFIG лежит в секретах, раскомментируйте:
     - name: Set up Kubeconfig Secret
       uses: azure/k8s-set-context@v3
       with:
@@ -74,7 +72,6 @@ jobs:
     - name: Deploy with Helm
       run: |
         # Обновляем или устанавливаем приложение через Helm
-        # Важно: путь ./django-app-chart должен существовать в репозитории!
         helm upgrade --install ${{ env.HELM_RELEASE }} ./django-app-chart \
           --namespace ${{ env.K8S_NAMESPACE }} \
           --create-namespace \
@@ -90,9 +87,13 @@ jobs:
 
     - name: Run database migrations
       run: |
-        # Получаем имя любого пода (через label selector чарта)
-        # Обычно Helm добавляет app.kubernetes.io/name или app
+        # Получаем имя пода. Сначала пробуем по метке instance, если пусто - берем любой под в namespace
         POD_NAME=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l "app.kubernetes.io/instance=${{ env.HELM_RELEASE }}" -o jsonpath='{.items[0].metadata.name}')
+        
+        if [ -z "$POD_NAME" ]; then
+           echo "Pod with label instance=${{ env.HELM_RELEASE }} not found. Taking any pod..."
+           POD_NAME=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.items[0].metadata.name}')
+        fi
         
         echo "Running migrations on pod: $POD_NAME"
         
@@ -109,20 +110,34 @@ jobs:
     steps:
     - name: Check application health
       run: |
-        # Ищем сервис (имя может зависеть от чарта, берем первый попавшийся сервис приложения)
+        # Ищем сервис. Сначала пробуем по метке, если пусто - ищем по имени релиза
         SERVICE_NAME=$(kubectl get svc -n ${{ env.K8S_NAMESPACE }} -l "app.kubernetes.io/instance=${{ env.HELM_RELEASE }}" -o jsonpath='{.items[0].metadata.name}')
         
+        if [ -z "$SERVICE_NAME" ]; then
+           # Пробуем просто имя релиза
+           if kubectl get svc -n ${{ env.K8S_NAMESPACE }} ${{ env.HELM_RELEASE }} >/dev/null 2>&1; then
+              SERVICE_NAME="${{ env.HELM_RELEASE }}"
+           else
+              # Фоллбэк: берем любой сервис
+              SERVICE_NAME=$(kubectl get svc -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.items[0].metadata.name}')
+           fi
+        fi
+        
         echo "Testing service: $SERVICE_NAME"
+        
+        if [ -z "$SERVICE_NAME" ]; then
+           echo "Error: No service found!"
+           exit 1
+        fi
         
         # Пробрасываем порт
         kubectl port-forward -n ${{ env.K8S_NAMESPACE }} service/$SERVICE_NAME 8081:8000 &
         PID=$!
         sleep 10
         
-        # Проверяем ( health/ и metrics/ должны быть реализованы в Django)
-        # Используем || true чтобы тест не падал, если url недоступен (для отладки)
-        curl -f http://localhost:8081/health/ || echo "Health check failed"
-        curl -f http://localhost:8081/metrics/ || echo "Metrics check failed"
+        # Проверяем endpoints
+        curl -f http://localhost:8081/health/ || echo "Health check failed (maybe endpoint missing?)"
+        curl -f http://localhost:8081/metrics/ || echo "Metrics check failed (maybe endpoint missing?)"
         
         # Убиваем проброс
         kill $PID
